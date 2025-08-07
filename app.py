@@ -137,14 +137,22 @@ class UnderwritingModel:
 
     # revenue
     def _revenue(self) -> None:
-        if not self.rr.empty and "Current_Rent" in self.rr.columns:
-            base_rent = self.rr["Current_Rent"].sum()
+        if not self.rr.empty and "effective_rent" in self.rr.columns:
+            base_rent = self.rr["effective_rent"].sum() / 12  # Convert annual to monthly
         else:
             base_rent = self.a["Purchase_Price"] * self.a["Acq_Cap_Rate_pct"] / 100 / 12
+        
         ramp = np.minimum(np.arange(len(self.periods)) / self.a["Renovation_Months"], 1)
         rent = base_rent * (1 + self.a["Rent_Upside_pct"] / 100 * ramp)
         rent *= (1 + self.a["Annual_Rent_Growth"] / 100) ** (np.arange(len(rent)) / 12)
-        self.proj["EGI"] = rent * (1 - self.a["Vacancy_Physical_pct"] / 100)
+        
+        # If we have detailed rent roll data, use that directly, otherwise apply vacancy
+        if not self.rr.empty and "effective_rent" in self.rr.columns:
+            # Rent roll already accounts for vacancy and concessions
+            self.proj["EGI"] = rent
+        else:
+            # Apply vacancy rate
+            self.proj["EGI"] = rent * (1 - self.a["Vacancy_Physical_pct"] / 100)
 
     # expenses
     def _expenses(self) -> None:
@@ -248,7 +256,116 @@ def run_streamlit() -> None:
     st.set_page_config(page_title="Underwriting Model", layout="wide")
     st.title("🏗️ Multifamily Underwriting Model")
 
-    st.sidebar.header("Key Assumptions")
+    # Create tabs
+    tab1, tab2, tab3 = st.tabs(["📊 Analysis", "🏠 Rent Roll", "📈 Results"])
+    
+    # Initialize session state for rent roll data
+    if 'rent_roll_data' not in st.session_state:
+        st.session_state.rent_roll_data = {
+            'Unit Type 1': {'units': 50, 'avg_rent': 2500, 'vacancy_pct': 5.0, 'concession_pct': 2.0},
+            'Unit Type 2': {'units': 30, 'avg_rent': 3000, 'vacancy_pct': 4.0, 'concession_pct': 1.5},
+            'Unit Type 3': {'units': 25, 'avg_rent': 3500, 'vacancy_pct': 6.0, 'concession_pct': 3.0},
+            'Unit Type 4': {'units': 20, 'avg_rent': 2000, 'vacancy_pct': 5.5, 'concession_pct': 2.5},
+            'Unit Type 5': {'units': 15, 'avg_rent': 4000, 'vacancy_pct': 3.0, 'concession_pct': 1.0}
+        }
+    
+    with tab2:
+        st.header("Rent Roll Assumptions")
+        st.write("Configure rent assumptions for each unit type. This will feed into the operating model.")
+        
+        # Create rent roll input form
+        rent_roll_data = {}
+        total_units = 0
+        total_potential_rent = 0
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        columns = [col1, col2, col3, col4, col5]
+        
+        for i, (unit_type, col) in enumerate(zip(st.session_state.rent_roll_data.keys(), columns)):
+            with col:
+                st.subheader(unit_type)
+                
+                # Input fields for each unit type
+                units = st.number_input(
+                    "Number of Units", 
+                    min_value=0, 
+                    value=st.session_state.rent_roll_data[unit_type]['units'],
+                    key=f"units_{i}"
+                )
+                
+                avg_rent = st.number_input(
+                    "Average Rent ($)", 
+                    min_value=0, 
+                    value=st.session_state.rent_roll_data[unit_type]['avg_rent'],
+                    step=50,
+                    key=f"rent_{i}"
+                )
+                
+                vacancy_pct = st.number_input(
+                    "Vacancy Rate (%)", 
+                    min_value=0.0, 
+                    max_value=100.0,
+                    value=st.session_state.rent_roll_data[unit_type]['vacancy_pct'],
+                    step=0.5,
+                    key=f"vacancy_{i}"
+                )
+                
+                concession_pct = st.number_input(
+                    "Concession Rate (%)", 
+                    min_value=0.0, 
+                    max_value=100.0,
+                    value=st.session_state.rent_roll_data[unit_type]['concession_pct'],
+                    step=0.5,
+                    key=f"concession_{i}"
+                )
+                
+                # Calculate effective rent for this unit type
+                gross_potential_rent = units * avg_rent * 12
+                vacancy_loss = gross_potential_rent * (vacancy_pct / 100)
+                concession_loss = gross_potential_rent * (concession_pct / 100)
+                effective_rent = gross_potential_rent - vacancy_loss - concession_loss
+                
+                st.metric("Annual Effective Rent", f"${effective_rent:,.0f}")
+                
+                # Store data
+                rent_roll_data[unit_type] = {
+                    'units': units,
+                    'avg_rent': avg_rent,
+                    'vacancy_pct': vacancy_pct,
+                    'concession_pct': concession_pct,
+                    'effective_rent': effective_rent
+                }
+                
+                total_units += units
+                total_potential_rent += effective_rent
+        
+        # Update session state
+        st.session_state.rent_roll_data = rent_roll_data
+        
+        # Summary metrics
+        st.subheader("Rent Roll Summary")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Units", f"{total_units:,}")
+        with col2:
+            st.metric("Annual Effective Rent", f"${total_potential_rent:,.0f}")
+        with col3:
+            avg_rent_per_unit = total_potential_rent / (total_units * 12) if total_units > 0 else 0
+            st.metric("Avg Monthly Rent/Unit", f"${avg_rent_per_unit:,.0f}")
+        
+        # Display rent roll table
+        rent_roll_df = pd.DataFrame.from_dict(rent_roll_data, orient='index')
+        rent_roll_df['Gross Annual Rent'] = rent_roll_df['units'] * rent_roll_df['avg_rent'] * 12
+        rent_roll_df['Vacancy Loss'] = rent_roll_df['Gross Annual Rent'] * rent_roll_df['vacancy_pct'] / 100
+        rent_roll_df['Concession Loss'] = rent_roll_df['Gross Annual Rent'] * rent_roll_df['concession_pct'] / 100
+        rent_roll_df['Net Annual Rent'] = rent_roll_df['Gross Annual Rent'] - rent_roll_df['Vacancy Loss'] - rent_roll_df['Concession Loss']
+        
+        st.subheader("Detailed Rent Roll")
+        st.dataframe(rent_roll_df.round(0), use_container_width=True)
+
+    with tab1:
+        st.header("Financial Assumptions")
+        st.sidebar.header("Key Assumptions")
     
     # Property Details
     st.sidebar.subheader("Property Details")
@@ -313,70 +430,85 @@ def run_streamlit() -> None:
         "Refi_Costs_pct_NewLoan": refi_costs_pct,
     }
 
-    # Run the model
-    if st.button("Run Analysis", type="primary"):
-        with st.spinner("Running underwriting analysis..."):
-            model = UnderwritingModel(assumptions=assumptions)
-            
-            # Display key metrics
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric("Equity IRR", f"{model.metrics['Equity IRR']:.2%}")
-            with col2:
-                st.metric("Equity Multiple", f"{model.metrics['Equity Multiple']:.2f}x")
-            with col3:
-                st.metric("Min DSCR", f"{model.metrics['Min DSCR']:.2f}")
-            with col4:
-                st.metric("Max LTV", f"{model.metrics['Max LTV']:.1%}")
-            
-            # Covenant status
-            st.subheader("Covenant Status")
-            col1, col2 = st.columns(2)
-            with col1:
-                if model.metrics["DSCR Covenant Pass"]:
-                    st.success("✅ DSCR Covenant: PASS")
-                else:
-                    st.error("❌ DSCR Covenant: FAIL")
-            with col2:
-                if model.metrics["LTV Covenant Pass"]:
-                    st.success("✅ LTV Covenant: PASS")
-                else:
-                    st.error("❌ LTV Covenant: FAIL")
-            
-            # Charts
-            st.subheader("Financial Projections")
-            
-            # Monthly cash flows chart
-            st.subheader("Monthly Cash Flows")
-            chart_data = pd.DataFrame({
-                'NOI': model.proj['NOI'],
-                'Debt Service': model.proj['Debt_Service'],
-                'Cash Flow After Debt': model.proj['CF_After_Debt']
-            })
-            st.line_chart(chart_data)
-            
-            # Key metrics over time
-            st.subheader("Key Metrics Over Time")
-            metrics_data = pd.DataFrame({
-                'DSCR': model.proj['DSCR'],
-                'LTV': model.proj['LTV']
-            })
-            st.line_chart(metrics_data)
-            
-            # Show detailed projection table
-            st.subheader("Detailed Monthly Projections")
-            st.dataframe(model.proj.round(0), use_container_width=True)
-            
-            # Excel export
-            st.subheader("Export Results")
-            excel_data = model.to_excel_bytes()
-            st.download_button(
-                label="📊 Download Excel Report",
-                data=excel_data,
-                file_name=f"underwriting_analysis_{date.today().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+    # Store assumptions in session state
+    st.session_state.assumptions = assumptions
+
+    with tab3:
+        st.header("Analysis Results")
+        
+        # Check if we have both assumptions and rent roll data
+        if 'assumptions' in st.session_state and 'rent_roll_data' in st.session_state:
+            if st.button("Run Analysis", type="primary"):
+                # Prepare rent roll DataFrame for the model
+                rent_roll_df = pd.DataFrame.from_dict(st.session_state.rent_roll_data, orient='index')
+                
+                with st.spinner("Running underwriting analysis..."):
+                    model = UnderwritingModel(
+                        assumptions=st.session_state.assumptions,
+                        rent_roll=rent_roll_df
+                    )
+                    
+                    # Display key metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric("Equity IRR", f"{model.metrics['Equity IRR']:.2%}")
+                    with col2:
+                        st.metric("Equity Multiple", f"{model.metrics['Equity Multiple']:.2f}x")
+                    with col3:
+                        st.metric("Min DSCR", f"{model.metrics['Min DSCR']:.2f}")
+                    with col4:
+                        st.metric("Max LTV", f"{model.metrics['Max LTV']:.1%}")
+                    
+                    # Covenant status
+                    st.subheader("Covenant Status")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if model.metrics["DSCR Covenant Pass"]:
+                            st.success("✅ DSCR Covenant: PASS")
+                        else:
+                            st.error("❌ DSCR Covenant: FAIL")
+                    with col2:
+                        if model.metrics["LTV Covenant Pass"]:
+                            st.success("✅ LTV Covenant: PASS")
+                        else:
+                            st.error("❌ LTV Covenant: FAIL")
+                    
+                    # Charts
+                    st.subheader("Financial Projections")
+                    
+                    # Monthly cash flows chart
+                    st.subheader("Monthly Cash Flows")
+                    chart_data = pd.DataFrame({
+                        'NOI': model.proj['NOI'],
+                        'Debt Service': model.proj['Debt_Service'],
+                        'Cash Flow After Debt': model.proj['CF_After_Debt']
+                    })
+                    st.line_chart(chart_data)
+                    
+                    # Key metrics over time
+                    st.subheader("Key Metrics Over Time")
+                    metrics_data = pd.DataFrame({
+                        'DSCR': model.proj['DSCR'],
+                        'LTV': model.proj['LTV']
+                    })
+                    st.line_chart(metrics_data)
+                    
+                    # Show detailed projection table
+                    st.subheader("Detailed Monthly Projections")
+                    st.dataframe(model.proj.round(0), use_container_width=True)
+                    
+                    # Excel export
+                    st.subheader("Export Results")
+                    excel_data = model.to_excel_bytes()
+                    st.download_button(
+                        label="📊 Download Excel Report",
+                        data=excel_data,
+                        file_name=f"underwriting_analysis_{date.today().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+        else:
+            st.info("Please configure assumptions in the Analysis tab and rent roll data in the Rent Roll tab, then return here to run the analysis.")
 
 # ---------------------------------------------------------------------------
 # Self-testing functionality
