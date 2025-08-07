@@ -142,24 +142,47 @@ class UnderwritingModel:
         else:
             base_rent = self.a["Purchase_Price"] * self.a["Acq_Cap_Rate_pct"] / 100 / 12
         
+        # Apply renovation ramp-up
         ramp = np.minimum(np.arange(len(self.periods)) / self.a["Renovation_Months"], 1)
         rent = base_rent * (1 + self.a["Rent_Upside_pct"] / 100 * ramp)
-        rent *= (1 + self.a["Annual_Rent_Growth"] / 100) ** (np.arange(len(rent)) / 12)
         
-        # If we have detailed rent roll data, use that directly, otherwise apply vacancy
+        # Apply limited-year rent growth
+        growth_years = self.a.get("Rent_Growth_Years", 5)
+        months_passed = np.arange(len(rent))
+        years_passed = months_passed / 12
+        
+        # Apply growth only for the specified number of years
+        growth_factor = np.where(
+            years_passed <= growth_years,
+            (1 + self.a["Annual_Rent_Growth"] / 100) ** years_passed,
+            (1 + self.a["Annual_Rent_Growth"] / 100) ** growth_years  # Stop growing after specified years
+        )
+        rent *= growth_factor
+        
+        # Apply vacancy rate
         if not self.rr.empty and "effective_rent" in self.rr.columns:
             # Rent roll already accounts for vacancy and concessions
             self.proj["EGI"] = rent
         else:
-            # Apply vacancy rate
             self.proj["EGI"] = rent * (1 - self.a["Vacancy_Physical_pct"] / 100)
 
     # expenses
     def _expenses(self) -> None:
         self.proj["OpEx"] = self.proj["EGI"] * self.a["Operating_Expense_Ratio_pct_of_EGI"] / 100
-        self.proj["OpEx"] *= (1 + self.a["Expense_Increase_Annual_pct"] / 100) ** (
-            np.arange(len(self.proj)) / 12
+        
+        # Apply limited-year expense growth
+        expense_growth_years = self.a.get("Expense_Growth_Years", 5)
+        months_passed = np.arange(len(self.proj))
+        years_passed = months_passed / 12
+        
+        # Apply expense growth only for the specified number of years
+        expense_growth_factor = np.where(
+            years_passed <= expense_growth_years,
+            (1 + self.a["Expense_Increase_Annual_pct"] / 100) ** years_passed,
+            (1 + self.a["Expense_Increase_Annual_pct"] / 100) ** expense_growth_years
         )
+        
+        self.proj["OpEx"] *= expense_growth_factor
         self.proj["NOI"] = self.proj["EGI"] - self.proj["OpEx"]
 
     # debt
@@ -286,7 +309,7 @@ def run_streamlit() -> None:
     st.title("🏗️ Multifamily Underwriting Model")
 
     # Create tabs
-    tab1, tab2, tab3 = st.tabs(["📊 Analysis", "🏠 Rent Roll", "📈 Results"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📋 Assumptions", "🏠 Rent Roll", "📊 Analysis", "📈 Results"])
     
     # Initialize session state for rent roll data
     if 'rent_roll_data' not in st.session_state:
@@ -393,76 +416,142 @@ def run_streamlit() -> None:
         st.dataframe(rent_roll_df.round(0), use_container_width=True)
 
     with tab1:
-        st.header("Financial Assumptions")
-        st.sidebar.header("Key Assumptions")
+        st.header("Deal Assumptions")
+        
+        # Timeline section
+        st.subheader("📅 Transaction Timeline")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            acquisition_year = st.number_input("Acquisition Year", value=2025, min_value=2024, max_value=2035, step=1)
+            acquisition_month = st.selectbox("Acquisition Month", list(range(1, 13)), index=8)  # September default
+        
+        with col2:
+            refi_year = st.number_input("Refinance Year", value=2030, min_value=acquisition_year, max_value=2040, step=1)
+            refi_month = st.selectbox("Refinance Month", list(range(1, 13)), index=8)
+            
+        with col3:
+            sale_year = st.number_input("Sale Year", value=2032, min_value=refi_year, max_value=2045, step=1)
+            sale_month = st.selectbox("Sale Month", list(range(1, 13)), index=8)
+        
+        # Sources and Uses section
+        st.subheader("💰 Sources and Uses")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Uses**")
+            purchase_price = st.number_input("Purchase Price ($)", value=40_000_000, min_value=1_000, step=100_000, format="%d")
+            closing_costs_pct = st.number_input("Closing Costs (%)", value=1.5, min_value=0.0, max_value=10.0, step=0.1)
+            renovation_budget = st.number_input("Renovation Budget ($)", value=3_500_000, min_value=0, step=50_000, format="%d")
+            renovation_months = st.number_input("Renovation Period (months)", value=12, min_value=1, max_value=60)
+            
+        with col2:
+            st.write("**Sources**")
+            loan_ltv = st.number_input("Initial LTV (%)", value=65.0, min_value=0.0, max_value=90.0, step=1.0)
+            loan_amount = purchase_price * loan_ltv / 100
+            equity_required = purchase_price * (1 - loan_ltv / 100) + purchase_price * closing_costs_pct / 100 + renovation_budget
+            st.metric("Loan Amount", f"${loan_amount:,.0f}")
+            st.metric("Total Equity Required", f"${equity_required:,.0f}")
+        
+        # Debt Terms section
+        st.subheader("💳 Debt Terms")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Initial Loan**")
+            loan_rate = st.number_input("Interest Rate (%)", value=5.75, min_value=1.0, max_value=15.0, step=0.25)
+            amort_years = st.number_input("Amortization (years)", value=30, min_value=10, max_value=40)
+            io_months = st.number_input("Interest Only Period (months)", value=24, min_value=0, max_value=120)
+            
+        with col2:
+            st.write("**Refinance Terms**")
+            refi_ltv = st.number_input("Refi LTV (%)", value=70.0, min_value=0.0, max_value=90.0, step=1.0)
+            refi_rate = st.number_input("Refi Interest Rate (%)", value=5.5, min_value=1.0, max_value=15.0, step=0.25)
+            refi_costs_pct = st.number_input("Refi Costs (%)", value=1.0, min_value=0.0, max_value=5.0, step=0.1)
+        
+        # Revenue Assumptions section
+        st.subheader("📈 Revenue Growth")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            acq_cap_rate = st.number_input("Acquisition Cap Rate (%)", value=5.0, min_value=1.0, max_value=20.0, step=0.1)
+            rent_upside_pct = st.number_input("Total Rent Upside (%)", value=15.0, min_value=0.0, max_value=100.0, step=1.0)
+            annual_rent_growth = st.number_input("Annual Rent Growth (%)", value=3.0, min_value=0.0, max_value=10.0, step=0.1)
+            
+        with col2:
+            vacancy_pct = st.number_input("Stabilized Vacancy Rate (%)", value=5.0, min_value=0.0, max_value=20.0, step=0.5)
+            rent_growth_years = st.number_input("Years of Rent Growth", value=5, min_value=1, max_value=10, step=1, help="Number of years to apply annual rent growth")
+            
+        # Operating Expense Assumptions
+        st.subheader("💸 Operating Expenses")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            opex_ratio = st.number_input("OpEx Ratio (% of EGI)", value=38.0, min_value=10.0, max_value=80.0, step=1.0)
+            expense_growth = st.number_input("Annual Expense Growth (%)", value=3.0, min_value=0.0, max_value=10.0, step=0.1)
+            
+        with col2:
+            expense_growth_years = st.number_input("Years of Expense Growth", value=5, min_value=1, max_value=10, step=1, help="Number of years to apply expense growth")
+        
+        # Exit Assumptions
+        st.subheader("🏁 Exit Strategy")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            exit_cap_rate = st.number_input("Exit Cap Rate (%)", value=5.0, min_value=1.0, max_value=20.0, step=0.1)
+            
+        with col2:
+            sale_costs_pct = st.number_input("Sale Costs (%)", value=1.0, min_value=0.0, max_value=10.0, step=0.1)
     
-    # Property Details
-    st.sidebar.subheader("Property Details")
-    purchase_price = st.sidebar.number_input("Purchase Price ($)", value=40_000_000, min_value=1_000, step=100_000, format="%d")
-    closing_costs_pct = st.sidebar.number_input("Closing Costs (%)", value=1.5, min_value=0.0, max_value=10.0, step=0.1)
-    renovation_budget = st.sidebar.number_input("Renovation Budget ($)", value=3_500_000, min_value=0, step=50_000, format="%d")
-    renovation_months = st.sidebar.number_input("Renovation Period (months)", value=12, min_value=1, max_value=60)
-    
-    # Revenue Assumptions
-    st.sidebar.subheader("Revenue Assumptions")
-    acq_cap_rate = st.sidebar.number_input("Acquisition Cap Rate (%)", value=5.0, min_value=1.0, max_value=20.0, step=0.1)
-    rent_upside_pct = st.sidebar.number_input("Rent Upside (%)", value=15.0, min_value=0.0, max_value=100.0, step=1.0)
-    annual_rent_growth = st.sidebar.number_input("Annual Rent Growth (%)", value=3.0, min_value=0.0, max_value=10.0, step=0.1)
-    vacancy_pct = st.sidebar.number_input("Vacancy Rate (%)", value=5.0, min_value=0.0, max_value=20.0, step=0.5)
-    
-    # Expense Assumptions
-    st.sidebar.subheader("Operating Expenses")
-    opex_ratio = st.sidebar.number_input("OpEx Ratio (% of EGI)", value=38.0, min_value=10.0, max_value=80.0, step=1.0)
-    expense_growth = st.sidebar.number_input("Annual Expense Growth (%)", value=3.0, min_value=0.0, max_value=10.0, step=0.1)
-    
-    # Debt Assumptions
-    st.sidebar.subheader("Debt Assumptions")
-    loan_ltv = st.sidebar.number_input("Initial LTV (%)", value=65.0, min_value=0.0, max_value=90.0, step=1.0)
-    loan_rate = st.sidebar.number_input("Interest Rate (%)", value=5.75, min_value=1.0, max_value=15.0, step=0.25)
-    amort_years = st.sidebar.number_input("Amortization (years)", value=30, min_value=10, max_value=40)
-    io_months = st.sidebar.number_input("Interest Only Period (months)", value=24, min_value=0, max_value=120)
-    
-    # Exit Assumptions
-    st.sidebar.subheader("Exit Assumptions")
-    exit_cap_rate = st.sidebar.number_input("Exit Cap Rate (%)", value=5.0, min_value=1.0, max_value=20.0, step=0.1)
-    sale_costs_pct = st.sidebar.number_input("Sale Costs (%)", value=1.0, min_value=0.0, max_value=10.0, step=0.1)
-    
-    # Refinance Assumptions
-    st.sidebar.subheader("Refinance Assumptions")
-    refi_ltv = st.sidebar.number_input("Refi LTV (%)", value=70.0, min_value=0.0, max_value=90.0, step=1.0)
-    refi_rate = st.sidebar.number_input("Refi Interest Rate (%)", value=5.5, min_value=1.0, max_value=15.0, step=0.25)
-    refi_costs_pct = st.sidebar.number_input("Refi Costs (%)", value=1.0, min_value=0.0, max_value=5.0, step=0.1)
-    
-    # Build custom assumptions
-    assumptions = {
-        "Acquisition_Date": date(2025, 9, 1),
-        "Refi_Date": date(2030, 9, 1),
-        "Sale_Date": date(2032, 9, 1),
-        "Purchase_Price": purchase_price,
-        "Closing_Costs_pct": closing_costs_pct,
-        "Exit_Cap_Rate_pct": exit_cap_rate,
-        "Sale_Costs_pct_of_Sale": sale_costs_pct,
-        "Renovation_Budget": renovation_budget,
-        "Renovation_Months": renovation_months,
-        "Rent_Upside_pct": rent_upside_pct,
-        "Annual_Rent_Growth": annual_rent_growth,
-        "Vacancy_Physical_pct": vacancy_pct,
-        "Operating_Expense_Ratio_pct_of_EGI": opex_ratio,
-        "Expense_Increase_Annual_pct": expense_growth,
-        "Acq_Cap_Rate_pct": acq_cap_rate,
-        "Loan1_LTV_pct": loan_ltv,
-        "Loan1_Rate_Annual_pct": loan_rate,
-        "Loan1_Amort_Months": amort_years * 12,
-        "Loan1_IO_Months": io_months,
-        "Refi_LTV_pct": refi_ltv,
-        "Refi_Rate_Annual_pct": refi_rate,
-        "Refi_Costs_pct_NewLoan": refi_costs_pct,
-    }
+        # Build custom assumptions using the new inputs
+        assumptions = {
+            "Acquisition_Date": date(acquisition_year, acquisition_month, 1),
+            "Refi_Date": date(refi_year, refi_month, 1),
+            "Sale_Date": date(sale_year, sale_month, 1),
+            "Purchase_Price": purchase_price,
+            "Closing_Costs_pct": closing_costs_pct,
+            "Exit_Cap_Rate_pct": exit_cap_rate,
+            "Sale_Costs_pct_of_Sale": sale_costs_pct,
+            "Renovation_Budget": renovation_budget,
+            "Renovation_Months": renovation_months,
+            "Rent_Upside_pct": rent_upside_pct,
+            "Annual_Rent_Growth": annual_rent_growth,
+            "Rent_Growth_Years": rent_growth_years,
+            "Vacancy_Physical_pct": vacancy_pct,
+            "Operating_Expense_Ratio_pct_of_EGI": opex_ratio,
+            "Expense_Increase_Annual_pct": expense_growth,
+            "Expense_Growth_Years": expense_growth_years,
+            "Acq_Cap_Rate_pct": acq_cap_rate,
+            "Loan1_LTV_pct": loan_ltv,
+            "Loan1_Rate_Annual_pct": loan_rate,
+            "Loan1_Amort_Months": amort_years * 12,
+            "Loan1_IO_Months": io_months,
+            "Refi_LTV_pct": refi_ltv,
+            "Refi_Rate_Annual_pct": refi_rate,
+            "Refi_Costs_pct_NewLoan": refi_costs_pct,
+        }
 
-    # Store assumptions in session state
-    st.session_state.assumptions = assumptions
+        # Store assumptions in session state
+        st.session_state.assumptions = assumptions
 
     with tab3:
+        st.header("Quick Analysis")
+        st.write("Use this tab for quick analysis and model overview. Detailed results are available in the Results tab.")
+        
+        # Show key assumptions summary if available
+        if 'assumptions' in st.session_state:
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Purchase Price", f"${st.session_state.assumptions['Purchase_Price']:,.0f}")
+            with col2:
+                st.metric("Initial LTV", f"{st.session_state.assumptions['Loan1_LTV_pct']:.1f}%")
+            with col3:
+                st.metric("Acquisition Cap", f"{st.session_state.assumptions['Acq_Cap_Rate_pct']:.1f}%")
+            with col4:
+                st.metric("Hold Period", f"{(st.session_state.assumptions['Sale_Date'] - st.session_state.assumptions['Acquisition_Date']).days // 365:.1f} years")
+
+    with tab4:
         st.header("Analysis Results")
         
         # Check if we have both assumptions and rent roll data
