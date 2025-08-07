@@ -238,18 +238,36 @@ class UnderwritingModel:
     # cash flows
     def _cashflows(self) -> None:
         self.proj["CF_After_Debt"] = self.proj["NOI"] - self.proj["Debt_Service"]
+        
+        # Calculate total equity investment (negative cash flow at acquisition)
         equity_in = (
             self.a["Purchase_Price"] * (1 - self.a["Loan1_LTV_pct"] / 100)
             + self.a["Purchase_Price"] * self.a["Closing_Costs_pct"] / 100
             + self.a["Renovation_Budget"]
         )
+        
+        # Initialize cash flow columns
         self.proj["Equity_Contribution"] = 0.0
-        self.proj.iat[0, self.proj.columns.get_loc("Equity_Contribution")] = equity_in
-        self.proj["Equity_Distribution"] = self.proj.get("Refi_Proceeds", 0.0)
+        self.proj["Equity_Distribution"] = 0.0
+        
+        # Set initial equity contribution (negative = cash outflow)
+        self.proj.iloc[0, self.proj.columns.get_loc("Equity_Contribution")] = -equity_in
+        
+        # Handle refinance proceeds if applicable
+        if "Refi_Proceeds" in self.proj.columns:
+            self.proj["Equity_Distribution"] = self.proj["Refi_Proceeds"].fillna(0.0)
+        
+        # Calculate sale proceeds at exit
         sale_val = self._value(self.periods[-1])
         sale_net = sale_val * (1 - self.a["Sale_Costs_pct_of_Sale"] / 100) - self.proj.iloc[-1]["Loan_Balance"]
-        self.proj.iat[-1, self.proj.columns.get_loc("Equity_Distribution")] += sale_net
-        self.proj["Equity_CF"] = -self.proj["Equity_Contribution"] + self.proj["Equity_Distribution"] + self.proj["CF_After_Debt"]
+        self.proj.iloc[-1, self.proj.columns.get_loc("Equity_Distribution")] += sale_net
+        
+        # Total equity cash flow = contributions + distributions + operating cash flow
+        self.proj["Equity_CF"] = (
+            self.proj["Equity_Contribution"] + 
+            self.proj["Equity_Distribution"] + 
+            self.proj["CF_After_Debt"]
+        )
 
     # covenants
     def _covenants(self) -> None:
@@ -281,9 +299,14 @@ class UnderwritingModel:
         min_dscr_safe = min_dscr if not np.isnan(min_dscr) else 0.0
         max_ltv_safe = max_ltv if not np.isnan(max_ltv) else 1.0
         
+        # Calculate equity multiple correctly
+        total_distributions = self.proj["Equity_Distribution"].sum() + self.proj["CF_After_Debt"].sum()
+        total_contributions = abs(self.proj["Equity_Contribution"].sum())  # Make positive
+        equity_multiple = total_distributions / total_contributions if total_contributions > 0 else 0.0
+        
         self.metrics = {
             "Equity IRR": irr(self.proj["Equity_CF"].values),
-            "Equity Multiple": self.proj["Equity_CF"].sum() / -self.proj["Equity_Contribution"].sum(),
+            "Equity Multiple": equity_multiple,
             "Min DSCR": min_dscr_safe,
             "Max LTV": max_ltv_safe,
             "DSCR Covenant Pass": min_dscr_safe >= self.dscr_thresh,
@@ -566,12 +589,43 @@ def run_streamlit() -> None:
                         rent_roll=rent_roll_df
                     )
                     
-                    # Display key inputs first
-                    st.subheader("Key Calculation Inputs")
+                    # Debug information first
+                    st.subheader("🔍 Calculation Debug")
+                    with st.expander("View Calculation Details"):
+                        col1, col2, col3 = st.columns(3)
+                        
+                        total_equity_contrib = abs(model.proj["Equity_Contribution"].sum())
+                        total_operating_cf = model.proj["CF_After_Debt"].sum()
+                        total_distributions = model.proj["Equity_Distribution"].sum()
+                        
+                        with col1:
+                            st.metric("Total Equity Invested", f"${total_equity_contrib:,.0f}")
+                            st.metric("Total Operating CF", f"${total_operating_cf:,.0f}")
+                        with col2:
+                            st.metric("Total Distributions", f"${total_distributions:,.0f}")
+                            st.metric("Sale Year NOI", f"${model.proj.iloc[-1]['NOI'] * 12:,.0f}")
+                        with col3:
+                            st.metric("Property Value at Sale", f"${model.proj.iloc[-1]['Prop_Value']:,.0f}")
+                            st.metric("Remaining Debt", f"${model.proj.iloc[-1]['Loan_Balance']:,.0f}")
+                        
+                        # Show cash flow series for IRR calc
+                        st.write("**Equity Cash Flow Series (for IRR):**")
+                        cf_series = model.proj["Equity_CF"].values
+                        st.write(f"Cash flows: {cf_series[:5].round(0)}... (showing first 5)")
+                        
+                        # Show first few and last few periods
+                        st.write("**First 3 months:**")
+                        st.dataframe(model.proj[['NOI', 'Debt_Service', 'CF_After_Debt', 'Equity_CF']].head(3).round(0))
+                        
+                        st.write("**Last 3 months:**")
+                        st.dataframe(model.proj[['NOI', 'Debt_Service', 'CF_After_Debt', 'Equity_CF']].tail(3).round(0))
+                    
+                    # Display key inputs
+                    st.subheader("Key Deal Parameters")
                     col1, col2, col3, col4 = st.columns(4)
                     
                     loan_amount = st.session_state.assumptions["Purchase_Price"] * st.session_state.assumptions["Loan1_LTV_pct"] / 100
-                    equity_amount = st.session_state.assumptions["Purchase_Price"] - loan_amount
+                    equity_amount = abs(model.proj["Equity_Contribution"].sum())
                     
                     with col1:
                         st.metric("Purchase Price", f"${st.session_state.assumptions['Purchase_Price']:,.0f}")
@@ -580,7 +634,7 @@ def run_streamlit() -> None:
                     with col3:
                         st.metric("Initial LTV", f"{st.session_state.assumptions['Loan1_LTV_pct']:.1f}%")
                     with col4:
-                        st.metric("Equity Investment", f"${equity_amount:,.0f}")
+                        st.metric("Total Equity Required", f"${equity_amount:,.0f}")
                     
                     # Display key metrics
                     st.subheader("Investment Returns")
