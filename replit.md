@@ -9,15 +9,17 @@ Preferred communication style: Simple, everyday language.
 # System Architecture
 
 ## Application Structure
-The system follows a modular Python architecture with dual interface support:
+The system follows a modular Python architecture with web-based interface:
 
-**Dual Interface Design**: The application provides both a Streamlit web GUI and CLI interface, allowing users to interact through their preferred method. The web interface offers an interactive experience for detailed analysis, while the CLI provides quick calculations and automated testing capabilities.
+**Web Interface Design**: The application provides a comprehensive Streamlit web GUI with tabbed navigation for organized data entry and analysis. The interface includes Assumptions, Rent Roll, Quick Analysis, and Results tabs for structured workflow.
 
-**Financial Calculation Engine**: Core underwriting logic built around standard real estate investment metrics (IRR, DSCR, cash flows). The model uses NumPy for numerical computations and Pandas for data manipulation, ensuring accurate financial calculations.
+**Financial Calculation Engine**: Core underwriting logic built around standard real estate investment metrics (IRR, DSCR, cash flows). The model uses NumPy for numerical computations and Pandas for data manipulation, ensuring accurate financial calculations with proper error handling.
+
+**Annual Statement Reporting**: Results are presented as structured annual operating statements showing operating performance, debt service, and year-end covenant tests in traditional real estate format rather than charts.
+
+**Enhanced Input Controls**: Date selection for acquisition/refinance/disposition timing, limited-year growth controls for revenue and expenses, and comprehensive rent roll support for multi-unit properties.
 
 **Self-Testing Framework**: Built-in validation system that runs sanity checks on calculations using realistic baseline scenarios. The tests verify that IRR is positive (equity preservation) and minimum DSCR stays above 1.0 (debt coverage requirements).
-
-**Graceful Degradation**: The application handles optional dependencies elegantly - if Streamlit is not available, it falls back to CLI-only mode without breaking core functionality.
 
 ## Data Processing
 **Input Handling**: Supports various input methods including manual parameter entry through the web interface and programmatic input for automated scenarios.

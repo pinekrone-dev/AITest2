@@ -673,29 +673,68 @@ def run_streamlit() -> None:
                         else:
                             st.error("❌ LTV Covenant: FAIL")
                     
-                    # Charts
-                    st.subheader("Financial Projections")
+                    # Annual Operating Statement
+                    st.subheader("Annual Operating Statement")
                     
-                    # Monthly cash flows chart (clean data for visualization)
-                    st.subheader("Monthly Cash Flows")
-                    chart_data = pd.DataFrame({
-                        'NOI': model.proj['NOI'].replace([np.inf, -np.inf], np.nan).fillna(0),
-                        'Debt Service': model.proj['Debt_Service'].replace([np.inf, -np.inf], np.nan).fillna(0),
-                        'Cash Flow After Debt': model.proj['CF_After_Debt'].replace([np.inf, -np.inf], np.nan).fillna(0)
-                    })
-                    st.line_chart(chart_data)
+                    # Create annual summary from monthly data
+                    annual_data = []
+                    years = model.proj.index.year.unique()
                     
-                    # Key metrics over time (clean data for visualization)
-                    st.subheader("Key Metrics Over Time")
-                    metrics_data = pd.DataFrame({
-                        'DSCR': model.proj['DSCR'].replace([np.inf, -np.inf], np.nan).fillna(1.0),
-                        'LTV': model.proj['LTV'].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-                    })
-                    st.line_chart(metrics_data)
+                    for year in sorted(years):
+                        year_data = model.proj[model.proj.index.year == year]
+                        
+                        # Use December values for year-end metrics
+                        year_end_data = year_data.iloc[-1] if len(year_data) > 0 else year_data.iloc[0]
+                        
+                        annual_summary = {
+                            'Year': year,
+                            'Gross Revenue': year_data['EGI'].sum(),
+                            'Operating Expenses': year_data['OpEx'].sum(),
+                            'Net Operating Income': year_data['NOI'].sum(),
+                            'Debt Service': year_data['Debt_Service'].sum(),
+                            'Cash Flow After Debt': year_data['CF_After_Debt'].sum(),
+                            'Year-End Loan Balance': year_end_data['Loan_Balance'],
+                            'Year-End Property Value': year_end_data['Prop_Value'],
+                            'Year-End LTV': year_end_data['LTV'],
+                            'Year-End DSCR': year_end_data['DSCR']
+                        }
+                        annual_data.append(annual_summary)
                     
-                    # Show detailed projection table
-                    st.subheader("Detailed Monthly Projections")
-                    st.dataframe(model.proj.round(0), use_container_width=True)
+                    annual_df = pd.DataFrame(annual_data)
+                    
+                    # Format the annual statement nicely
+                    if not annual_df.empty:
+                        # Operating Statement Section
+                        st.write("**Operating Performance by Year:**")
+                        operating_cols = ['Year', 'Gross Revenue', 'Operating Expenses', 'Net Operating Income']
+                        operating_display = annual_df[operating_cols].copy()
+                        
+                        # Format currency columns
+                        for col in ['Gross Revenue', 'Operating Expenses', 'Net Operating Income']:
+                            operating_display[col] = operating_display[col].apply(lambda x: f"${x:,.0f}")
+                        
+                        st.dataframe(operating_display, use_container_width=True, hide_index=True)
+                        
+                        # Debt Service Section
+                        st.write("**Debt Service by Year:**")
+                        debt_cols = ['Year', 'Debt Service', 'Cash Flow After Debt', 'Year-End Loan Balance']
+                        debt_display = annual_df[debt_cols].copy()
+                        
+                        for col in ['Debt Service', 'Cash Flow After Debt', 'Year-End Loan Balance']:
+                            debt_display[col] = debt_display[col].apply(lambda x: f"${x:,.0f}")
+                        
+                        st.dataframe(debt_display, use_container_width=True, hide_index=True)
+                        
+                        # Covenant Tests Section
+                        st.write("**Year-End Covenant Tests:**")
+                        covenant_cols = ['Year', 'Year-End Property Value', 'Year-End LTV', 'Year-End DSCR']
+                        covenant_display = annual_df[covenant_cols].copy()
+                        
+                        covenant_display['Year-End Property Value'] = covenant_display['Year-End Property Value'].apply(lambda x: f"${x:,.0f}")
+                        covenant_display['Year-End LTV'] = covenant_display['Year-End LTV'].apply(lambda x: f"{x:.1%}" if not pd.isna(x) else "N/A")
+                        covenant_display['Year-End DSCR'] = covenant_display['Year-End DSCR'].apply(lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A")
+                        
+                        st.dataframe(covenant_display, use_container_width=True, hide_index=True)
                     
                     # Excel export
                     st.subheader("Export Results")
