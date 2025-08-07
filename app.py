@@ -193,11 +193,18 @@ class UnderwritingModel:
             refi_costs = new_loan * self.a["Refi_Costs_pct_NewLoan"] / 100
             proceeds = new_loan - self.proj.loc[refi_date, "Loan_Balance"] - refi_costs
             self.proj.loc[refi_date, "Refi_Proceeds"] = proceeds
+            
+            # Calculate new loan payments (interest only for refinance)
             rate2 = self.a["Refi_Rate_Annual_pct"] / 100
             bal_now = new_loan
             for i in range(idx, len(self.proj)):
                 interest = bal_now * rate2 / 12
-                self.proj.iloc[i, self.proj.columns.get_loc("Debt_Service")] = interest
+                # Assuming IO loan after refinance (common structure)
+                payment = interest
+                principal = 0
+                bal_now -= principal  # No principal paydown on IO loan
+                
+                self.proj.iloc[i, self.proj.columns.get_loc("Debt_Service")] = payment
                 self.proj.iloc[i, self.proj.columns.get_loc("Interest")] = interest
                 self.proj.iloc[i, self.proj.columns.get_loc("Loan_Balance")] = bal_now
 
@@ -223,19 +230,41 @@ class UnderwritingModel:
 
     # covenants
     def _covenants(self) -> None:
-        self.proj["DSCR"] = self.proj["NOI"] / self.proj["Debt_Service"].replace(0, np.nan)
+        # Calculate DSCR - handle zero debt service
+        debt_service_safe = self.proj["Debt_Service"].replace(0, np.nan)
+        self.proj["DSCR"] = np.where(
+            debt_service_safe.isna() | (debt_service_safe == 0),
+            np.nan,
+            self.proj["NOI"] / debt_service_safe
+        )
+        
+        # Calculate property value using NOI and exit cap rate
         self.proj["Prop_Value"] = self.proj["NOI"] * 12 / (self.a["Exit_Cap_Rate_pct"] / 100)
-        self.proj["LTV"] = self.proj["Loan_Balance"] / self.proj["Prop_Value"]
+        
+        # Calculate LTV - handle zero property value
+        self.proj["LTV"] = np.where(
+            (self.proj["Prop_Value"] == 0) | self.proj["Prop_Value"].isna(),
+            np.nan,
+            self.proj["Loan_Balance"] / self.proj["Prop_Value"]
+        )
 
     # summary metrics
     def _summary(self) -> None:
+        # Calculate metrics with proper NaN handling
+        min_dscr = self.proj["DSCR"].replace([np.inf, -np.inf], np.nan).min()
+        max_ltv = self.proj["LTV"].replace([np.inf, -np.inf], np.nan).max()
+        
+        # Ensure we have valid values for covenant tests
+        min_dscr_safe = min_dscr if not np.isnan(min_dscr) else 0.0
+        max_ltv_safe = max_ltv if not np.isnan(max_ltv) else 1.0
+        
         self.metrics = {
             "Equity IRR": irr(self.proj["Equity_CF"].values),
             "Equity Multiple": self.proj["Equity_CF"].sum() / -self.proj["Equity_Contribution"].sum(),
-            "Min DSCR": self.proj["DSCR"].min(),
-            "Max LTV": self.proj["LTV"].max(),
-            "DSCR Covenant Pass": float(self.proj["DSCR"].min()) >= self.dscr_thresh,
-            "LTV Covenant Pass": float(self.proj["LTV"].max()) <= self.ltv_thresh,
+            "Min DSCR": min_dscr_safe,
+            "Max LTV": max_ltv_safe,
+            "DSCR Covenant Pass": min_dscr_safe >= self.dscr_thresh,
+            "LTV Covenant Pass": max_ltv_safe <= self.ltv_thresh,
         }
 
     def to_excel_bytes(self) -> bytes:
@@ -448,7 +477,24 @@ def run_streamlit() -> None:
                         rent_roll=rent_roll_df
                     )
                     
+                    # Display key inputs first
+                    st.subheader("Key Calculation Inputs")
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    loan_amount = st.session_state.assumptions["Purchase_Price"] * st.session_state.assumptions["Loan1_LTV_pct"] / 100
+                    equity_amount = st.session_state.assumptions["Purchase_Price"] - loan_amount
+                    
+                    with col1:
+                        st.metric("Purchase Price", f"${st.session_state.assumptions['Purchase_Price']:,.0f}")
+                    with col2:
+                        st.metric("Loan Amount", f"${loan_amount:,.0f}")
+                    with col3:
+                        st.metric("Initial LTV", f"{st.session_state.assumptions['Loan1_LTV_pct']:.1f}%")
+                    with col4:
+                        st.metric("Equity Investment", f"${equity_amount:,.0f}")
+                    
                     # Display key metrics
+                    st.subheader("Investment Returns")
                     col1, col2, col3, col4 = st.columns(4)
                     
                     with col1:
