@@ -304,8 +304,18 @@ class UnderwritingModel:
         total_contributions = abs(self.proj["Equity_Contribution"].sum())  # Make positive
         equity_multiple = total_distributions / total_contributions if total_contributions > 0 else 0.0
         
+        # Calculate IRR with error handling
+        try:
+            equity_cf = self.proj["Equity_CF"].values
+            equity_irr = irr(equity_cf)
+            # Handle NaN or infinite IRR
+            if np.isnan(equity_irr) or np.isinf(equity_irr):
+                equity_irr = 0.0
+        except:
+            equity_irr = 0.0
+        
         self.metrics = {
-            "Equity IRR": irr(self.proj["Equity_CF"].values),
+            "Equity IRR": equity_irr,
             "Equity Multiple": equity_multiple,
             "Min DSCR": min_dscr_safe,
             "Max LTV": max_ltv_safe,
@@ -666,20 +676,20 @@ def run_streamlit() -> None:
                     # Charts
                     st.subheader("Financial Projections")
                     
-                    # Monthly cash flows chart
+                    # Monthly cash flows chart (clean data for visualization)
                     st.subheader("Monthly Cash Flows")
                     chart_data = pd.DataFrame({
-                        'NOI': model.proj['NOI'],
-                        'Debt Service': model.proj['Debt_Service'],
-                        'Cash Flow After Debt': model.proj['CF_After_Debt']
+                        'NOI': model.proj['NOI'].replace([np.inf, -np.inf], np.nan).fillna(0),
+                        'Debt Service': model.proj['Debt_Service'].replace([np.inf, -np.inf], np.nan).fillna(0),
+                        'Cash Flow After Debt': model.proj['CF_After_Debt'].replace([np.inf, -np.inf], np.nan).fillna(0)
                     })
                     st.line_chart(chart_data)
                     
-                    # Key metrics over time
+                    # Key metrics over time (clean data for visualization)
                     st.subheader("Key Metrics Over Time")
                     metrics_data = pd.DataFrame({
-                        'DSCR': model.proj['DSCR'],
-                        'LTV': model.proj['LTV']
+                        'DSCR': model.proj['DSCR'].replace([np.inf, -np.inf], np.nan).fillna(1.0),
+                        'LTV': model.proj['LTV'].replace([np.inf, -np.inf], np.nan).fillna(0.0)
                     })
                     st.line_chart(metrics_data)
                     
