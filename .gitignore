@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.claude_cache/
+.file_snapshots/
+.prompt_templates/
+.inbox_watcher/
